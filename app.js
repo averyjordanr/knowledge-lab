@@ -78,17 +78,70 @@ const seed = () => ({
   ]
 });
 const REAL = !!window.__KL_REAL; if(REAL) document.documentElement.classList.add('real');
+(function(){
+  if(!REAL || navigator.standalone !== true) return;
+  const root = document.documentElement; let last = '';
+  function fit(){
+    const land = window.innerWidth > window.innerHeight, sw = screen.width, sh = screen.height;
+    const full = land ? Math.min(sw, sh) : Math.max(sw, sh), wide = land ? Math.max(sw, sh) : Math.min(sw, sh);
+    const key = land + ':' + window.innerWidth;
+    if(key === last) return;
+    last = key; root.classList.remove('iosgap');
+    requestAnimationFrame(() => {
+      const gap = full - window.innerHeight;
+      if(Math.abs(wide - window.innerWidth) < 2 && gap > 1 && gap < 90){ root.style.setProperty('--klh', full + 'px'); root.classList.add('iosgap'); }
+    });
+  }
+  fit(); window.addEventListener('resize', fit); window.addEventListener('orientationchange', () => setTimeout(fit, 250));
+})();
 function emptySeed(){ const s = seed(); Object.keys(s).forEach(k => { if(Array.isArray(s[k]) && k !== 'cOpen') s[k] = []; }); Object.assign(s, {curBook:null, selBook:null, selProblem:null, selConcept:null, drafts:{}, lastLoc:'', trash:[]}); return s; }
-const hot0 = window.claude && window.claude.hot && window.claude.hot.data, saved0 = REAL && window.__KL_STATE;
+/* ---------- storage ----------
+   The notebook is kept as separate records, so a pen stroke rewrites one small record and never the library:
+   core (settings and small lists), books, notes, problems, inbox, trash, pw (the attempt in progress), one att:<id> per
+   submitted attempt, and one img:<key> per picture. Pictures are written once and never again. Undo steps are not stored. */
+const noUndo = (k, v) => k === 'undo' ? undefined : v;
+const KL_HEAVY = ['books','notes','problems','pAttempts','inbox','trash','pw'];
+function klLean(st){ if(!st) return st; const strip = w => { if(w && Array.isArray(w.blocks)) w.blocks.forEach(b => { delete b.undo; }); }; (st.pAttempts || []).forEach(strip); strip(st.pw); (st.trash || []).forEach(t => Object.keys(t && t.B || {}).forEach(k => (t.B[k] || []).forEach(strip)));
+  if(!st.fmt){ if(Array.isArray(st.inbox)) st.inbox = st.inbox.filter(x => !(x.filed && x.type === 'set')); st.fmt = 2; } return st; }
+const klImg = new Map(), klRefs = {}, klLast = {}, klStored = new Set(); let klImgN = 0;   // picture text -> key; record -> picture keys; what is on disk
+const klKeyOf = v => { let k = klImg.get(v); if(!k){ k = 'i' + Date.now().toString(36) + (klImgN++).toString(36); klImg.set(v, k); } return k; };
+function klText(key, obj){ const refs = new Set(); const t = JSON.stringify(obj, (k, v) => { if(k === 'undo') return undefined; if(typeof v === 'string' && v.length > 2000 && v.slice(0, 5) === 'data:'){ const id = klKeyOf(v); refs.add(id); return {$img:id}; } return v; }); klRefs[key] = refs; return t; }
+/* A cheap fingerprint of an attempt: everything but the stroke points, plus the ends of every stroke. Lets a save skip unchanged attempts without reading tens of thousands of points each. */
+function klSig(a){ let n = 0, h = 0; const lite = JSON.stringify(a, (k, v) => { if(k === 'undo') return undefined; if(k === 'strokes' && Array.isArray(v)){ v.forEach(s => { const p = s.pts || [], q = p[0] || [0, 0], r = p[p.length - 1] || [0, 0]; n += p.length; h = (h * 31 + p.length * 7 + Math.round(q[0] * 10) + Math.round(q[1] * 10) * 3 + Math.round(r[0] * 10) * 5 + Math.round(r[1] * 10) * 11 + String(s.c || '').length + (s.txt ? s.txt.length : 0)) % 2147483647; }); return v.length; } return typeof v === 'string' && v.length > 2000 ? v.length : v; }); return lite + '|' + n + '|' + h; }
+function klAssemble(recs){ if(!recs || typeof recs.core !== 'string') return null;
+  try{ const rv = key => (k, v) => { if(v && typeof v === 'object' && typeof v.$img === 'string'){ const im = recs['img:' + v.$img]; if(typeof im === 'string'){ klImg.set(im, v.$img); (klRefs[key] = klRefs[key] || new Set()).add(v.$img); return im; } return ''; } return v; };
+    const get = (key, d) => typeof recs[key] === 'string' ? JSON.parse(recs[key], rv(key)) : d, st = get('core', null); if(!st || st.v !== 10) return null;
+    st.books = get('books', []); st.notes = get('notes', []); st.problems = get('problems', []); st.inbox = get('inbox', []); st.trash = get('trash', []); st.pw = get('pw', null);
+    st.pAttempts = (st.attIds || []).map(id => get('att:' + id, null)).filter(Boolean); delete st.attIds;
+    Object.keys(recs).forEach(k => { if(typeof recs[k] === 'string' && !/^img:/.test(k) && k !== 'pw' && k !== 'trash' && !/^att:/.test(k)) klLast[k] = recs[k]; if(/^img:/.test(k)) klStored.add(k.slice(4)); });
+    klLast.trash = klTrashSig(st.trash); if(st.pw) klLast.pw = klSig(st.pw); st.pAttempts.forEach(a => { klLast['att:' + a.id] = klSig(a); });
+    return st; }catch(e){ return null; } }
+function klTrashSig(t){ return (t || []).map(x => x && x.id).join(','); }
+const hot0 = window.claude && window.claude.hot && window.claude.hot.data, recs0 = REAL && window.__KL_RECS, fresh0 = REAL && klAssemble(recs0), saved0 = REAL && (fresh0 || klLean(recs0 && recs0.state && typeof recs0.state === 'object' ? recs0.state : window.__KL_STATE));
 let S = REAL ? (saved0 && saved0.v === 10 ? Object.assign(emptySeed(), saved0, {sheet:false, inkFs:null, graphFs:null, offline:false, unsynced:0, imp:null}) : emptySeed()) : hot0 && hot0.v === 10 ? Object.assign(seed(), hot0) : seed();
-let klT = 0, klBusy = false, klAgain = false;
-function klSaveNow(){ if(!REAL || !window.__KL_SAVE) return; if(klBusy){ klAgain = true; return; } klBusy = true; let snap; try{ snap = JSON.parse(JSON.stringify(S)); }catch(e){ klBusy = false; return; }
-  window.__KL_SAVE(snap).then(() => { S.unsynced = 0; S.saveErr = false; }, () => { S.saveErr = true; }).then(() => { klBusy = false; if($('sync')) top(); if(klAgain){ klAgain = false; klSoon(); } }); }
-function klSoon(){ if(!REAL) return; clearTimeout(klT); klT = setTimeout(klSaveNow, 700); }
-if(REAL){ ['input','change','click','pointerup','keyup'].forEach(ev => document.addEventListener(ev, () => { S.unsynced = 1; klSoon(); }, true)); document.addEventListener('visibilitychange', () => { if(document.hidden){ clearTimeout(klT); klSaveNow(); } }); window.addEventListener('pagehide', () => { clearTimeout(klT); klSaveNow(); }); }
-function klExport(){ const blob = new Blob([JSON.stringify({app:'knowledge-lab', exported:new Date().toISOString(), state:S})], {type:'application/json'}), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'knowledge-lab-backup-' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000); toast('Backup file saved to your downloads.'); }
-function klImport(file){ const r = new FileReader(); r.onload = () => { try{ const d = JSON.parse(r.result), st = d && d.app === 'knowledge-lab' ? d.state : null; if(!st || st.v !== 10 || !Array.isArray(st.books)) throw 0; S = Object.assign(emptySeed(), st, {sheet:false, inkFs:null, graphFs:null, offline:false, unsynced:1, view:'cover'}); applyTheme(); sheet(); render(); klSaveNow(); toast('Backup restored: ' + plural(S.books.length, 'book') + ', ' + plural(S.notes.length, 'note') + ', ' + plural(S.problems.length, 'problem') + '.'); }catch(e){ toast('That file is not a Knowledge Lab backup.'); } }; r.readAsText(file); }
-document.addEventListener('change', e => { const t = e.target; if(t.dataset && t.dataset.klimport !== undefined && t.files && t.files[0]){ klImport(t.files[0]); t.value = ''; } if(t.dataset && t.dataset.klset){ S[t.dataset.klset] = t.value.trim(); if(typeof aiSetup === 'function') aiSetup(); } });
+if(REAL) S.fmt = 2;
+let klT = 0, klBusy = false, klAgain = false, klOld = !!(REAL && recs0 && recs0.state !== undefined);
+function klPlan(){ const puts = [], next = {};
+  const want = (key, text) => { next[key] = text; if(klLast[key] !== text) puts.push([key, text]); }, wantSig = (key, sig, make) => { next[key] = sig; if(klLast[key] !== sig) puts.push([key, make()]); };
+  const core = {}; Object.keys(S).forEach(k => { if(!KL_HEAVY.includes(k) && k !== 'unsynced' && k !== 'saveErr') core[k] = S[k]; }); core.attIds = S.pAttempts.map(a => a.id);
+  want('core', klText('core', core)); ['books','notes','problems','inbox'].forEach(k => want(k, klText(k, S[k] || [])));
+  wantSig('trash', klTrashSig(S.trash), () => klText('trash', S.trash || []));
+  if(S.pw) wantSig('pw', klSig(S.pw), () => klText('pw', S.pw));
+  S.pAttempts.forEach(a => wantSig('att:' + a.id, klSig(a), () => klText('att:' + a.id, a)));
+  const dels = Object.keys(klLast).filter(k => !(k in next)); dels.forEach(k => { delete klRefs[k]; });
+  const used = new Set(); Object.keys(klRefs).forEach(k => klRefs[k].forEach(i => used.add(i))); const newImgs = [];
+  Array.from(klImg.entries()).forEach(e => { const text = e[0], key = e[1]; if(used.has(key)){ if(!klStored.has(key)){ puts.push(['img:' + key, text]); newImgs.push(key); } } else { if(klStored.has(key)) dels.push('img:' + key); klImg.delete(text); } });
+  if(klOld) dels.push('state');
+  return {puts:puts, dels:dels, next:next, newImgs:newImgs}; }
+function klSaveNow(force){ if(!REAL || !window.__KL_WRITE) return; if(klBusy){ klAgain = true; return; } if(!force && inkCur){ klSoon(); return; } klBusy = true; let plan; try{ plan = klPlan(); }catch(e){ klBusy = false; S.saveErr = true; if($('sync')) top(); return; }
+  const done = () => { klBusy = false; if($('sync')) top(); if(klAgain){ klAgain = false; klSoon(); } };
+  if(!plan.puts.length && !plan.dels.length){ S.unsynced = 0; S.saveErr = false; done(); return; }
+  window.__KL_WRITE(plan.puts, plan.dels).then(() => { Object.keys(klLast).forEach(k => { delete klLast[k]; }); Object.assign(klLast, plan.next); plan.newImgs.forEach(k => klStored.add(k)); plan.dels.forEach(k => { if(/^img:/.test(k)) klStored.delete(k.slice(4)); }); klOld = false; S.unsynced = 0; S.saveErr = false; }, () => { S.saveErr = true; }).then(done); }
+function klSoon(){ if(!REAL) return; clearTimeout(klT); klT = setTimeout(klSaveNow, 1500); }
+if(REAL){ ['input','change','click','pointerup','keyup'].forEach(ev => document.addEventListener(ev, () => { S.unsynced = 1; klSoon(); }, true)); document.addEventListener('visibilitychange', () => { if(document.hidden){ clearTimeout(klT); klSaveNow(true); } }); window.addEventListener('pagehide', () => { clearTimeout(klT); klSaveNow(true); }); if(saved0 && !fresh0) setTimeout(() => klSaveNow(true), 400); }
+function klExport(){ const blob = new Blob([JSON.stringify({app:'knowledge-lab', exported:new Date().toISOString(), state:S}, noUndo)], {type:'application/json'}), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'knowledge-lab-backup-' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000); toast('Backup file saved to your downloads.'); }
+function klImport(file){ const r = new FileReader(); r.onload = () => { try{ const d = JSON.parse(r.result), st = d && d.app === 'knowledge-lab' ? d.state : null; if(!st || st.v !== 10 || !Array.isArray(st.books)) throw 0; S = Object.assign(emptySeed(), klLean(st), {sheet:false, inkFs:null, graphFs:null, offline:false, unsynced:1, view:'cover'}); applyTheme(); sheet(); render(); klSaveNow(); toast('Backup restored: ' + plural(S.books.length, 'book') + ', ' + plural(S.notes.length, 'note') + ', ' + plural(S.problems.length, 'problem') + '.'); }catch(e){ toast('That file is not a Knowledge Lab backup.'); } }; r.readAsText(file); }
+document.addEventListener('change', e => { const t = e.target; if(t.dataset && t.dataset.klimport !== undefined && t.files && t.files[0]){ klImport(t.files[0]); t.value = ''; } if(t.dataset && t.dataset.bookfile !== undefined && t.files && t.files[0]){ bookFile(t.files[0]); t.value = ''; } if(t.dataset && t.dataset.klset){ S[t.dataset.klset] = t.value.trim(); if(typeof aiSetup === 'function') aiSetup(); } });
 const prob = id => S.problems.find(p => p.id === id);
 const psrc = p => { const b = p && p.book && S.books.find(x => x.id === p.book); return b ? b.title : 'No book'; };
 const book = id => S.books.find(b => b.id === id);
@@ -129,7 +182,7 @@ function top(){
 const areaOf = v => ['books','book','chapter','analysis','session','notes','concepts'].includes(v) ? 'books' : ['problems','work','inbox','errors'].includes(v) ? 'problems' : 'shared';
 const areaTabs = a => a === 'shared' ? [['today','Today','today'],['progress','Progress','progress']] : SUBS[a][1].map(x => [x[0], x[1], a]);
 function nav(){
-  const a = areaOf(S.view), nIn = S.inbox.filter(x => !x.filed).length;
+  const a = areaOf(S.view), nIn = S.inbox.filter(x => !x.filed && !x.filedN).length;
   const cur = v => S.view === v || (v === 'books' && ['book','chapter','analysis'].includes(S.view)) || (v === 'today' && S.view === 'review');
   $('nav').innerHTML = '<button class="home" style="--tc:var(--tint)" data-act="go" data-v="cover"><span aria-hidden="true">‹ </span>Home</button>' + areaTabs(a).map(t => '<button style="--tc:var(--c-' + t[2] + ')" data-act="go" data-v="' + t[0] + '"' + (cur(t[0]) ? ' aria-current="page"' : '') + '>' + t[1] + (t[0] === 'inbox' && nIn ? ' <span class="n">' + nIn + '</span>' : t[0] === 'work' && S.pw ? ' <span class="n">•</span>' : '') + '</button>').join('');
   $('area').textContent = a === 'shared' ? '' : SUBS[a][0];
@@ -157,7 +210,7 @@ function vToday(){
   const b = book(S.curBook), d = due(), mins = d.reduce((a,i) => a + i.mins, 0), qs = S.notes.filter(n => n.type === 'Open question'), tp = prob(S.selProblem) || S.problems[0];
   return '<div class="stack loose">' + head((h => h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening')(new Date().getHours()), (REAL ? 'Today' : 'Today · example data')) +
   section('Continue reading', '<div><h2>' + esc(b.title) + '</h2><p class="small">Stopped at ' + esc(b.pos) + '. ' + esc(b.purpose) + '.</p></div><div class="row"><button class="btn primary" data-act="go" data-v="session">Open session</button></div>') +
-  (!S.pw && !(prob(S.selProblem) || S.problems[0]) ? section('Continue a problem', '<p class="soft">No problems yet. Add one in the Problem Lab.</p>') : section('Continue a problem', (S.pw ? '<div><h2>' + esc(prob(S.pw.problem).loc) + '</h2><p class="small">Attempt in progress.</p></div>' : '<div><h2>' + esc(tp.loc) + '</h2><p class="small">' + esc(psrc(tp)) + '. Last attempt: ' + esc(helpText(lastAttempt(tp.id)).toLowerCase()) + '.</p></div>') + (S.pw ? '<div class="row"><button class="btn primary" data-act="go" data-v="work">Resume attempt</button></div>' : '<div class="row"><button class="btn primary" data-act="problem" data-id="' + tp.id + '">Open problem</button></div>') + (S.inbox.filter(x => !x.filed).length ? '<p class="small">' + S.inbox.filter(x => !x.filed).length + ' imported pages are waiting in the Problem Lab inbox.</p>' : ''))) +
+  (!S.pw && !(prob(S.selProblem) || S.problems[0]) ? section('Continue a problem', '<p class="soft">No problems yet. Add one in the Problem Lab.</p>') : section('Continue a problem', (S.pw ? '<div><h2>' + esc(prob(S.pw.problem).loc) + '</h2><p class="small">Attempt in progress.</p></div>' : '<div><h2>' + esc(tp.loc) + '</h2><p class="small">' + esc(psrc(tp)) + '. Last attempt: ' + esc(helpText(lastAttempt(tp.id)).toLowerCase()) + '.</p></div>') + (S.pw ? '<div class="row"><button class="btn primary" data-act="go" data-v="work">Resume attempt</button></div>' : '<div class="row"><button class="btn primary" data-act="problem" data-id="' + tp.id + '">Open problem</button></div>') + (S.inbox.filter(x => !x.filed && !x.filedN).length ? '<p class="small">' + S.inbox.filter(x => !x.filed && !x.filedN).length + ' imported pages are waiting in the Problem Lab inbox.</p>' : ''))) +
   section('Review', d.length ? '<p><span class="big">' + d.length + '</span> ' + (d.length === 1 ? 'task' : 'tasks') + ' ready, about ' + mins + ' of your 15 minutes.</p><div class="row"><button class="btn" data-act="go" data-v="review">Start review</button></div>' : '<p>Nothing due. Skipped days do not build a backlog.</p>') +
   section('What you still understand', '<p>You explained 3 of 4 regression ideas without hints this month.</p>' + (S.events.length || S.attempts.length ? '<p class="small">This visit: ' + S.attempts.length + ' recall ' + (S.attempts.length === 1 ? 'attempt' : 'attempts') + ', ' + S.events.length + ' review ' + (S.events.length === 1 ? 'answer' : 'answers') + '.</p>' : '')) +
   section('Open questions', lines(qs, {showBook:true})) +
@@ -207,10 +260,23 @@ function sampleBooks(){
   return out;
 }
 function logSession(b){ const last = S.sessions[S.sessions.length - 1]; if(!(last && last.book === b.id && last.ch === b.ch && last.when === 'Today')) S.sessions.push({book:b.id, ch:b.ch, when:'Today'}); }
+/* Adding many books at once. A book already on the shelf is skipped: same title once case and punctuation are ignored, or one title is the start of the other (stores cut long titles short). */
+const bookKey = t => String(t || '').toLowerCase().replace(/&amp;/g, 'and').replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '');
+const bookMain = t => bookKey(String(t || '').split(/[:(]/)[0].replace(/,\s*(\d+(st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|revised|updated|new)\s+edition\s*$/i, ''));
+const bookNames = a => { const t = String(a || '').toLowerCase().trim(); return t ? (t.match(/[a-z]{4,}/g) || [t]) : []; };
+function bookMerge(list, status){ const cut = t => /…\s*$/.test(String(t || '')), have = S.books.map(b => ({k:bookKey(String(b.title).replace(/…\s*$/, '')), m:bookMain(b.title), a:bookNames(b.author), c:cut(b.title), o:/:\s*$/.test(String(b.title)), b:b})).filter(h => h.k); let added = 0, skipped = 0, filled = 0; const t0 = Date.now();
+  /* The same book: the authors share a name (or one entry has none), and the titles are equal, or one is a cut-off start of the other, or one is just the main title of the other with no subtitle or series note. Two different books called "Probability" stay two books. */
+  const dup = (k, m, a, c, colon) => have.find(h => (!a.length || !h.a.length || a.some(n => h.a.includes(n))) && (k === h.k || ((c || h.c) && k.length >= 30 && h.k.length >= 30 && (h.k.indexOf(k) === 0 || k.indexOf(h.k) === 0)) || (m && m === h.m && ((k === m && !colon) || (h.k === h.m && !h.o)))));
+  list.forEach((x, i) => { const title = String(x && x.title || '').trim(), k = bookKey(title.replace(/…\s*$/, '')), m = bookMain(title), a = bookNames(x && x.author), c = cut(title), o = /:\s*$/.test(title); if(!title) return; const hit = dup(k, m, a, c, o); if(hit){ /* Already on the shelf: fill in what it lacks (chapters, edition, year), never overwrite what is there. */ const e = hit.b, ch = Array.isArray(x.chapters) ? x.chapters.map(q => String(q).trim()).filter(Boolean) : []; let f = false; if(e && ch.length && !(e.chapters || []).length){ e.chapters = ch; f = true; } if(e && x.edition && !e.edition){ e.edition = String(x.edition); f = true; } if(e && x.year && !e.year){ e.year = String(x.year); f = true; } if(e && x.isbn && !e.isbn){ e.isbn = String(x.isbn); f = true; } if(e && x.tocSource && !e.tocSource){ e.tocSource = String(x.tocSource); } if(f) filled++; else skipped++; return; } have.push({k:k, m:m, a:a, c:c, o:o});
+    const b = {id:'b' + t0 + '_' + i, title:title, author:String(x.author || '').trim(), edition:String(x.edition || '').trim(), year:String(x.year || '').trim(), chapters:Array.isArray(x.chapters) ? x.chapters.map(c => String(c).trim()).filter(Boolean) : [], status:x.status || status || '', pos:'', purpose:String(x.purpose || ''), depth:x.depth || 'Overview', output:'', reviews:true};
+    if(x.source) b.source = String(x.source); if(x.acquired) b.acquired = String(x.acquired); if(x.isbn) b.isbn = String(x.isbn); S.books.push(b); added++; });
+  return {added:added, skipped:skipped, filled:filled}; }
+function bookMergeDone(r){ S.sheet = false; sheet(); changed(r.added + r.filled); S.libSort = 'added'; go('books'); toast([r.added ? plural(r.added, 'book') + ' added to the shelf' : '', r.filled ? plural(r.filled, 'book') + ' on the shelf filled in (chapters, edition or year)' : '', r.skipped ? r.skipped + ' already there and unchanged' : ''].filter(Boolean).join('; ') + '.'); }
+function bookFile(file){ const r = new FileReader(); r.onload = () => { let list = null; try{ const d = JSON.parse(r.result); list = Array.isArray(d) ? d : d && Array.isArray(d.books) && d.kind === 'books' ? d.books : null; }catch(e){}
+    if(!list){ toast(/"state"\s*:/.test(String(r.result).slice(0, 400)) ? 'That is a full backup. Restore it from Page, not here.' : 'That file is not a Knowledge Lab book list.'); return; } bookMergeDone(bookMerge(list, S.drafts.imp_status || '')); }; r.readAsText(file); }
 function saveImport(){
-  const rows = (S.drafts.imp_text || '').split('\n').map(x => x.trim()).filter(Boolean); if(!rows.length){ toast('Paste at least one line.'); return; }
-  let n = 0; rows.forEach((r, i) => { const p = (r.indexOf('\t') >= 0 ? r.split('\t') : r.indexOf(';') >= 0 ? r.split(';') : r.indexOf('|') >= 0 ? r.split('|') : [r]).map(x => x.trim()); if(!p[0]) return; S.books.push({id:'b' + Date.now() + '_' + i, title:p[0], author:p[1] || '', edition:p[2] || '', year:p[3] || '', chapters:[], status:S.drafts.imp_status || '', pos:'', purpose:'', depth:'Overview', output:'', reviews:true}); n++; });
-  S.sheet = false; sheet(); changed(n); S.libSort = 'added'; go('books'); toast(plural(n, 'book') + ' added to the shelf.');
+  const rows = (S.drafts.imp_text || '').split('\n').map(x => x.trim()).filter(Boolean); if(!rows.length){ toast('Paste at least one line, or choose a book list file.'); return; }
+  bookMergeDone(bookMerge(rows.map(r => { const p = (r.indexOf('\t') >= 0 ? r.split('\t') : r.indexOf(';') >= 0 ? r.split(';') : r.indexOf('|') >= 0 ? r.split('|') : [r]).map(x => x.trim()); return {title:p[0], author:p[1], edition:p[2], year:p[3]}; }), S.drafts.imp_status || ''));
 }
 function vBook(){
   const b = book(S.selBook), chs = b.chapters || [], cs = bookConcepts(b), loose = S.notes.filter(n => n.book === b.id && (noteCh(n) < 0 || noteCh(n) >= chs.length));
@@ -500,7 +566,7 @@ function blocksEdit(w){
     : b.type === 'ink' ? inkBody(b, i, false) : graphBody(b, i)) + '</div>' + (at && at.i === i && at.pos === 1 ? chooser : '')).join('') +
     '<div class="row"><button class="btn" data-act="badd" data-t="text">+ Text</button><button class="btn" data-act="badd" data-t="ink">+ Handwriting</button><button class="btn" data-act="badd" data-t="graph">+ Graph</button></div><p class="small">These add at the end. Use “+ Above” or “+ Below” on any block to add next to it, and the arrows to reorder. Each block has its own pen colour. Red is kept for corrections. A graph plots up to three functions of x, separated by commas, or a 3D surface z = f(x, y) that you can drag to rotate. A handwriting block takes your stylus.</p>';
 }
-const inboxItem = (x, p) => x.type === 'set' ? '<div class="stack" style="gap:6px"><img class="inthumb" src="' + x.src + '" alt=""><p class="small">' + esc(x.kind) + '</p><div class="row"><button class="btn" data-act="impopen" data-id="' + x.id + '">Split into problems</button><button class="btn link mini" data-act="impdrop" data-id="' + x.id + '">Remove</button></div></div>' : '<div class="stack" style="gap:6px">' + (x.type === 'multi' ? '<div class="thumbs">' + x.shots.map((k, i) => '<div class="row" style="gap:8px;flex-wrap:nowrap"><div class="thumb" style="flex:1;min-height:44px">Screenshot ' + k + ' (simulated)</div>' + (i ? '<button class="btn link mini" data-act="ishot" data-id="' + x.id + '" data-i="' + i + '">Move up</button>' : '') + '</div>').join('') + '</div>' : '<div class="thumb">' + esc(x.kind) + ' (simulated)</div>') + '<p class="small">' + esc(x.from) + '</p>' +
+const inboxItem = (x, p) => x.type === 'set' ? '<div class="stack" style="gap:6px"><img class="inthumb" src="' + x.src + '" alt=""><p class="small">' + esc(x.kind) + (x.filedN ? ' · ' + plural(x.filedN, 'problem') + ' filed from this page so far' : '') + '</p><div class="row"><button class="btn" data-act="impopen" data-id="' + x.id + '">' + (x.filedN ? 'Cut more problems' : 'Split into problems') + '</button><button class="btn link mini" data-act="impdrop" data-id="' + x.id + '">' + (x.filedN ? 'Dismiss page' : 'Remove') + '</button></div></div>' : '<div class="stack" style="gap:6px">' + (x.type === 'multi' ? '<div class="thumbs">' + x.shots.map((k, i) => '<div class="row" style="gap:8px;flex-wrap:nowrap"><div class="thumb" style="flex:1;min-height:44px">Screenshot ' + k + ' (simulated)</div>' + (i ? '<button class="btn link mini" data-act="ishot" data-id="' + x.id + '" data-i="' + i + '">Move up</button>' : '') + '</div>').join('') + '</div>' : '<div class="thumb">' + esc(x.kind) + ' (simulated)</div>') + '<p class="small">' + esc(x.from) + '</p>' +
   (x.type === 'multi' ? '<p class="small">Tesseract found one exercise, Ex. 7.12, running across all three. Put them in reading order.</p><button class="btn" data-act="ifile" data-id="' + x.id + '">Combine into one problem</button>'
   : x.type === 'book' ? '<p class="small">Tesseract found Ex. 5.3 and Ex. 5.4.</p><button class="btn" data-act="ifile" data-id="' + x.id + '">File as 2 problems</button>'
   : '<button class="btn" data-act="idecl" data-id="' + x.id + '">File as working for ' + esc(p.loc.split(', ').pop()) + '</button>') + '</div>';
@@ -608,7 +674,7 @@ function inkAdd(e){
   (evs.length ? evs : [e]).forEach(ev => { const p = inkPt(c.cv, ev, c.t0);
     if(c.tool === 'eraser'){ const n = Math.max(1, Math.ceil(Math.hypot(p[0] - c.last[0], p[1] - c.last[1]) / (c.R / 2))); for(let j = 1; j <= n; j++) if(inkErase(c.b, [c.last[0] + (p[0] - c.last[0]) * j / n, c.last[1] + (p[1] - c.last[1]) * j / n], c.R, c.markup)) c.erased = true; c.last = p; }
     else { c.last = p; c.s.pts.push(p); inkSeg(c.cv.getContext('2d'), c.s, c.col, c.s.pts.length - 1); } });
-  if(c.tool === 'eraser') inkDraw(c.cv, {circle:[c.last[0], c.last[1], c.R]});
+  if(c.tool === 'eraser' && !c.raf) c.raf = requestAnimationFrame(() => { c.raf = 0; if(inkCur === c) inkDraw(c.cv, {circle:[c.last[0], c.last[1], c.R]}); });
 }
 document.addEventListener('pointermove', e => {
   const c = inkCur; if(!c) return;
@@ -640,7 +706,10 @@ document.addEventListener('scroll', e => { const t = e.target; if(t && t.dataset
 document.addEventListener('change', e => { const i = e.target.dataset && e.target.dataset.inkbg; if(i !== undefined && S.pw && S.pw.blocks[+i]){ S.pw.blocks[+i].bg = e.target.value; render(true); } });
 document.addEventListener('wheel', e => { const cv = e.target.closest ? e.target.closest('canvas.ink') : null; if(!cv || !(e.ctrlKey || e.metaKey)) return; const b = inkBlock(cv); if(!b) return; e.preventDefault(); inkSetZoom(cv, b, (b.zoom || 1) * (e.deltaY < 0 ? 1.1 : 1 / 1.1)); clearTimeout(inkTimer); inkTimer = setTimeout(initInk, 120); }, {passive:false});
 document.addEventListener('keydown', e => { if(e.key === 'Escape' && S.inkFs != null){ S.inkFs = null; render(true); } });
-window.addEventListener('resize', () => { clearTimeout(inkTimer); inkTimer = setTimeout(initInk, 120); });
+// Turning the device changes the screen's shape: grow the full-screen board to cover it again.
+function inkRefit(){ if(S.inkFs == null){ initInk(); return; } const cv = document.querySelector('canvas.ink[data-ink="' + S.inkFs + '"]'), b = cv && inkBlock(cv); if(!b){ initInk(); return; } const h0 = b.h, w0 = b.vw; inkFit(b, true); if(b.h !== h0 || b.vw !== w0){ cv.style.width = inkCss(b); cv.style.aspectRatio = inkVW(b) + ' / ' + b.h; } initInk(); }
+window.addEventListener('resize', () => { clearTimeout(inkTimer); inkTimer = setTimeout(inkRefit, 120); });
+window.addEventListener('orientationchange', () => { clearTimeout(inkTimer); inkTimer = setTimeout(inkRefit, 350); });
 async function inkToText(i){
   const b = S.pw && S.pw.blocks[i]; if(!b || !b.strokes.length){ toast('Write something first.'); return; }
   if(!navigator.createHandwritingRecognizer || typeof HandwritingStroke === 'undefined'){ toast('This browser cannot read handwriting. Use your keyboard’s handwriting input in a Text block instead.'); return; }
@@ -761,7 +830,7 @@ document.addEventListener('input', e => { const ds = e.target.dataset; if(!ds ||
 function vInbox(){
   if(S.imp && S.inbox.find(x => x.id === S.imp.id)) return vImport();
   const p = prob(S.selProblem) || S.problems[0] || {loc:'a new problem', id:null}, inbox = S.inbox.filter(x => !x.filed);
-  return '<div class="stack loose">' + head('Inbox', 'Pages wait here until you file them as problems under a book.') + '<div class="row"><label class="btn primary" style="cursor:pointer">+ Import pages<input type="file" accept="image/*" multiple hidden data-impfile></label>' + (REAL ? '' : '<button class="btn" data-act="impsample">Try a sample page</button>') + '</div><p class="small">Choose screenshots or photos of a problem set.' + (REAL ? '' : ' The three older items below are still simulated examples.') + '</p>' + (inbox.length ? '<div class="lines">' + inbox.map(x => inboxItem(x, p)).join('') + '</div>' : '<p class="soft">Nothing waiting. Pages from GoodNotes, Samsung Notes, PDFs and screenshots land here.</p>') + '</div>';
+  return '<div class="stack loose">' + head('Inbox', 'Pages wait here while you file their problems under a book. A page stays until you dismiss it, so you can come back and cut more.') + '<div class="row"><label class="btn primary" style="cursor:pointer">+ Import pages<input type="file" accept="image/*" multiple hidden data-impfile></label>' + (REAL ? '' : '<button class="btn" data-act="impsample">Try a sample page</button>') + '</div><p class="small">Choose screenshots or photos of a problem set.' + (REAL ? '' : ' The three older items below are still simulated examples.') + '</p>' + (inbox.length ? '<div class="lines">' + inbox.map(x => inboxItem(x, p)).join('') + '</div>' : '<p class="soft">Nothing waiting. Pages from GoodNotes, Samsung Notes, PDFs and screenshots land here.</p>') + '</div>';
 }
 function vErrors(){
   const A = S.pAttempts.filter(a => a.errors.length || a.fix), cats = ERRCATS.filter(c => A.some(a => a.errors.includes(c))), rest = A.filter(a => !a.errors.length);
@@ -804,7 +873,7 @@ function vProgress(){
 }
 function vCover(){
   const first = REAL && !S.books.length;
-  const nIn = S.inbox.filter(x => !x.filed).length, d = due().length;
+  const nIn = S.inbox.filter(x => !x.filed && !x.filedN).length, d = due().length;
   const W = 1000, H = 700, rnd = i => { const v = Math.sin(i * 12.9898) * 43758.5453; return v - Math.floor(v); };
   let ruled = '', grid = '', curves = '', pts = '';
   for(let y = 42; y < H; y += 28) ruled += '<line x1="0" x2="' + W + '" y1="' + y + '" y2="' + y + '"/>';
@@ -813,10 +882,10 @@ function vCover(){
   ['today','books','problems','concepts','progress'].forEach((c, k) => { let p = ''; for(let x = -10; x <= W + 10; x += 10){ const y = 372 - k * 16 + (64 + 20 * k) * Math.sin(x / (150 + 18 * k) + k * 1.3) * (0.3 + 0.7 * x / W); p += (p ? 'L' : 'M') + x + ' ' + y.toFixed(1); } curves += '<path d="' + p + '" fill="none" stroke="var(--c-' + c + ')" stroke-width="2.5" stroke-linecap="round" opacity=".9"/>'; });
   let bell = 'M430 ' + H; for(let x = 430; x <= W; x += 10) bell += 'L' + x + ' ' + (H - 330 * Math.exp(-Math.pow((x - 760) / 120, 2))).toFixed(1); bell += 'L' + W + ' ' + H + 'Z';
   for(let i = 0; i < 13; i++){ const x = 70 + i * 34, base = 640 - i * 15, y = base + (rnd(i + 1) - 0.5) * 70; pts += '<line x1="' + x + '" x2="' + x + '" y1="' + y.toFixed(1) + '" y2="' + base + '" stroke="var(--cover-ink)" stroke-width="1" opacity=".3"/><circle cx="' + x + '" cy="' + y.toFixed(1) + '" r="4.5" fill="var(--cover-ink)" opacity=".6"/>'; }
-  const bg = '<svg class="bgart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><defs><linearGradient id="kgl" x1="0" x2="1" y1="0" y2="0"><stop offset=".28" stop-color="#fff"/><stop offset=".6" stop-color="#000"/></linearGradient><linearGradient id="kgr" x1="0" x2="1" y1="0" y2="0"><stop offset=".4" stop-color="#000"/><stop offset=".72" stop-color="#fff"/></linearGradient><mask id="kml"><rect width="' + W + '" height="' + H + '" fill="url(#kgl)"/></mask><mask id="kmr"><rect width="' + W + '" height="' + H + '" fill="url(#kgr)"/></mask></defs>' +
+  const bg = '<svg class="bgart" viewBox="0 0 ' + W + ' ' + H + '" aria-hidden="true"><defs><linearGradient id="kgl" x1="0" x2="1" y1="0" y2="0"><stop offset=".28" stop-color="#fff"/><stop offset=".6" stop-color="#000"/></linearGradient><linearGradient id="kgr" x1="0" x2="1" y1="0" y2="0"><stop offset=".4" stop-color="#000"/><stop offset=".72" stop-color="#fff"/></linearGradient><mask id="kml"><rect width="' + W + '" height="' + H + '" fill="url(#kgl)"/></mask><mask id="kmr"><rect width="' + W + '" height="' + H + '" fill="url(#kgr)"/></mask></defs>' +
     '<g stroke="var(--cover-ink)" stroke-width="1" opacity=".13" mask="url(#kml)">' + ruled + '</g><g stroke="var(--cover-ink)" stroke-width="1" opacity=".11" mask="url(#kmr)">' + grid + '</g>' +
     '<circle cx="905" cy="95" r="170" fill="none" stroke="var(--cover-ink)" stroke-width="1.25" opacity=".16"/><circle cx="905" cy="95" r="118" fill="none" stroke="var(--cover-ink)" stroke-width="1.25" stroke-dasharray="3 7" opacity=".2"/>' +
-    '<path d="' + bell + '" fill="var(--cover-ink)" fill-opacity=".06" stroke="var(--cover-ink)" stroke-opacity=".3" stroke-width="1.5"/>' + curves +
+    '<path d="' + bell + '" fill="var(--cover-ink)" fill-opacity=".06" stroke="var(--cover-ink)" stroke-opacity=".3" stroke-width="1.5"/><g class="kcurves">' + curves + '</g>' +
     '<line x1="50" y1="650" x2="500" y2="452" stroke="var(--cover-ink)" stroke-width="1.5" stroke-dasharray="7 6" opacity=".45"/>' + pts + '</svg>';
   // Reading: a shelf of books with a leaning volume and a sprig
   const sp = [[24,26,74,'books'],[52,18,92,'today'],[72,30,64,'concepts'],[104,22,84,'progress'],[128,16,70,'problems'],[146,28,96,'books'],[176,20,60,'today']];
@@ -835,7 +904,7 @@ function vCover(){
     lab('problems', 'problems', graph, 'Problem Lab', 'Problems, worked attempts and corrections, for deriving and solving.', plural(S.problems.length, 'problem') + ' · ' + plural(S.pAttempts.length, 'attempt') + (nIn ? ' · ' + nIn + ' in the inbox' : '')) + '</div>' +
     (first ? '<div class="coverlinks"><button data-act="bookform">Add your first book</button><button data-act="klpick">Restore a backup</button><button data-act="klexample">Load the example notebook</button><input type="file" accept="application/json,.json" hidden id="klfile" data-klimport></div></div></div>' : '') + (first ? '' : '<div class="coverlinks"><button data-act="go" data-v="today">Today' + (d ? ' · ' + plural(d, 'review') + ' ready' : '') + '</button><button data-act="go" data-v="progress">Progress</button></div></div></div>');
 }
-const subnav = () => { const g = NAV.find(v => v[2].includes(S.view)), d = g && SUBS[g[0]]; if(!d) return ''; const nIn = S.inbox.filter(x => !x.filed).length; return '<nav class="sub" aria-label="' + d[0] + '"><span class="subname">' + d[0] + '</span>' + d[1].map(x => '<button data-act="go" data-v="' + x[0] + '"' + ((S.view === x[0] || (x[0] === 'books' && ['book','chapter','analysis'].includes(S.view))) ? ' aria-current="page"' : '') + '>' + x[1] + (x[0] === 'inbox' && nIn ? ' <span class="n">' + nIn + '</span>' : x[0] === 'work' && S.pw ? ' <span class="n">in progress</span>' : '') + '</button>').join('') + '</nav>'; };
+const subnav = () => { const g = NAV.find(v => v[2].includes(S.view)), d = g && SUBS[g[0]]; if(!d) return ''; const nIn = S.inbox.filter(x => !x.filed && !x.filedN).length; return '<nav class="sub" aria-label="' + d[0] + '"><span class="subname">' + d[0] + '</span>' + d[1].map(x => '<button data-act="go" data-v="' + x[0] + '"' + ((S.view === x[0] || (x[0] === 'books' && ['book','chapter','analysis'].includes(S.view))) ? ' aria-current="page"' : '') + '>' + x[1] + (x[0] === 'inbox' && nIn ? ' <span class="n">' + nIn + '</span>' : x[0] === 'work' && S.pw ? ' <span class="n">in progress</span>' : '') + '</button>').join('') + '</nav>'; };
 function render(keepScroll){
   if(REAL && !S.books.length) S.view = 'cover';
   const m = $('main'), y = m.scrollTop;
@@ -857,7 +926,7 @@ function sheet(){
     o.appendChild(d); return;
   }
   if(S.sheet === 'imp'){
-    d.innerHTML = '<form class="sheet stack" id="impform" role="dialog" aria-label="Import a list of books"><h2>Import a list</h2><p class="small">Paste one book per line: title; author; edition; year. Only the title is required. Columns copied from a spreadsheet work too.</p><label class="f" for="imp_text">Books<textarea id="imp_text" data-draft="imp_text" style="min-height:192px" placeholder="Convex Optimization; Boyd and Vandenberghe; 1st; 2004">' + esc(S.drafts.imp_text || '') + '</textarea></label><div class="stack" style="gap:2px"><h3>Add them as</h3>' + opts('impstatus','v',[['','Not started']].concat(STATUSES.map(x => [x,x])), S.drafts.imp_status || '') + '</div><div class="row"><button class="btn primary" type="submit">Add to the shelf</button><button class="btn link" type="button" data-act="sheetclose">Cancel</button></div></form>';
+    d.innerHTML = '<form class="sheet stack" id="impform" role="dialog" aria-label="Import a list of books"><h2>Import a list</h2><p class="small">Paste one book per line: title; author; edition; year. Only the title is required. Columns copied from a spreadsheet work too. Books already on your shelf are skipped.</p><div class="row"><label class="btn" style="cursor:pointer">Choose a book list file<input type="file" accept=".json,application/json" hidden data-bookfile></label><span class="small">For a prepared list of many books.</span></div><label class="f" for="imp_text">Books<textarea id="imp_text" data-draft="imp_text" style="min-height:192px" placeholder="Convex Optimization; Boyd and Vandenberghe; 1st; 2004">' + esc(S.drafts.imp_text || '') + '</textarea></label><div class="stack" style="gap:2px"><h3>Add them as</h3>' + opts('impstatus','v',[['','Not started']].concat(STATUSES.map(x => [x,x])), S.drafts.imp_status || '') + '</div><div class="row"><button class="btn primary" type="submit">Add to the shelf</button><button class="btn link" type="button" data-act="sheetclose">Cancel</button></div></form>';
     o.appendChild(d); return;
   }
   if(S.sheet === 'book'){
@@ -1050,7 +1119,7 @@ document.addEventListener('click', e => {
     case 'trashpurge': { if(S.delArm !== el.dataset.id){ S.delArm = el.dataset.id; sheet(); break; } S.trash = S.trash.filter(x => x.id !== el.dataset.id); S.delArm = null; changed(1); render(true); sheet(); break; }
     case 'impsample': S.inbox.push({id:'in' + Date.now(), type:'set', kind:'Sample page: 3.2 Exercises', src:samplePage(), filed:false}); render(true); break;
     case 'impdrop': S.inbox = S.inbox.filter(x => x.id !== el.dataset.id); render(true); break;
-    case 'impopen': { const it = S.inbox.find(x => x.id === el.dataset.id); if(!it) break; S.imp = {id:it.id, mode:'cut', tool:'cut', region:[0, 0, 1, 1], cuts:[], boxes:[], roles:{}, labels:{}}; Object.assign(S.drafts, {pr_book:'', pk_q:'', pr_ch:'', pr_sec:'', pr_tags:'', im_first:'1'}); render(); suggestCuts(it.src).then(c => { if(S.imp && S.imp.id === it.id){ S.imp.cuts = c; render(true); if(!c.length) toast('No clear gaps found. Trim the page to the exercises, or add cuts yourself.'); } }); break; }
+    case 'impopen': { const it = S.inbox.find(x => x.id === el.dataset.id); if(!it) break; S.imp = {id:it.id, mode:'cut', tool:'cut', region:[0, 0, 1, 1], cuts:[], boxes:[], roles:{}, labels:{}}; Object.assign(S.drafts, {pr_book:'', pk_q:'', pr_ch:'', pr_sec:'', pr_tags:'', im_first:'1'}, it.last || {}); render(); suggestCuts(it.src).then(c => { if(S.imp && S.imp.id === it.id){ S.imp.cuts = c; render(true); if(!c.length) toast('No clear gaps found. Trim the page to the exercises, or add cuts yourself.'); } }); break; }
     case 'impmode': { const I = S.imp, m = el.dataset.m; I.tool = m; if(m !== 'trim') I.mode = m; render(true); break; }
     case 'impusecuts': S.imp.mode = 'cut'; S.imp.tool = 'cut'; render(true); break;
     case 'imptrimreset': { const I = S.imp, it = S.inbox.find(x => x.id === I.id); I.region = [0, 0, 1, 1]; render(true); if(I.mode === 'cut') suggestCuts(it.src).then(c => { if(S.imp === I){ I.cuts = c; I.roles.cut = {}; I.labels.cut = {}; render(true); } }); break; }
@@ -1062,7 +1131,7 @@ document.addEventListener('click', e => {
     case 'cutadd': { const I = S.imp; if(!I || I.tool !== 'cut' || e.target.closest('.cutline') || (I.justDragged && Date.now() - I.justDragged < 350)) break; const r = $('cutwrap').getBoundingClientRect(), y = (e.clientY - r.top) / r.height; if(y <= I.region[1] || y >= I.region[3]) break; I.cuts.push(+y.toFixed(4)); I.cuts.sort((a, b) => a - b); I.roles.cut = {}; I.labels.cut = {}; render(true); break; }
     case 'impfile': { const I = S.imp, D = S.drafts, bk = D.pr_book && book(D.pr_book), it = S.inbox.find(x => x.id === I.id); if(!bk){ toast('Choose the book this page comes from first.'); break; } const P = impPieces(I), ch = D.pr_ch === '' || D.pr_ch == null ? null : +D.pr_ch, sec = (D.pr_sec || '').trim() || (ch != null ? 'Ch. ' + (ch + 1) : ''), tags = (D.pr_tags || '').split(',').map(x => x.trim()).filter(Boolean); if(!P.some((p, k) => impRole(I, k) === 'p')){ toast('There is no problem piece to file yet.'); break; }
       loadImg(it.src).then(async im => { let instr = null; const made = []; for(let k = 0; k < P.length; k++){ const role = impRole(I, k); if(role === 'x') continue; const pic = await cropPiece(im, P[k]); if(role === 'i'){ instr = pic; continue; } const p = {id:'p' + Date.now() + '_' + k, book:bk.id, ch:ch, loc:[sec, impLabel(I, k)].filter(Boolean).join(', '), tags:tags.slice(), text:'', parts:parseParts((I.pparts || {})[I.mode + k]), crop:pic, instr:instr, hints:[], solution:''}; S.problems.push(p); made.push(p); }
-        it.filed = true; S.imp = null; S.selProblem = made[0].id; S.problemOpen = true; changed(made.length); go('problems'); toast(plural(made.length, 'problem') + ' filed under ' + bk.title + (sec ? ', ' + sec : '') + '.'); }).catch(() => toast('That page could not be read as an image.')); break; }
+        it.filedN = (it.filedN || 0) + made.length; it.last = {pr_book:D.pr_book || '', pr_ch:D.pr_ch == null ? '' : D.pr_ch, pr_sec:D.pr_sec || '', pr_tags:D.pr_tags || ''}; S.imp = null; S.selProblem = made[0].id; S.problemOpen = true; changed(made.length); go('problems'); toast(plural(made.length, 'problem') + ' filed under ' + bk.title + (sec ? ', ' + sec : '') + '.'); }).catch(() => toast('That page could not be read as an image.')); break; }
     case 'probedit': { const q = prob(S.selProblem); if(!q) break; const parts = (q.loc || '').split(', '); S.editProb = q.id; Object.assign(S.drafts, {pr_book:q.book || '', pr_ch:q.ch != null ? String(q.ch) : '', pk_q:'', pr_sec:parts.length > 1 ? parts.slice(0, -1).join(', ') : '', pr_ex:parts[parts.length - 1] || '', pr_text:q.text, pr_tags:(q.tags || []).join(', '), pr_parts:(q.parts || []).join(', '), pr_sol:q.solution || ''}); S.sheet = 'prob'; sheet(); render(true); break; }
     case 'pcalcdel': w.calcs.splice(+el.dataset.i, 1); render(true); break;
     case 'creldel': { const c = S.concepts.find(x => x.id === S.selConcept); (c.rels || []).splice(+el.dataset.i, 1); changed(1); render(true); break; }

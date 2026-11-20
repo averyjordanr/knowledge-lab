@@ -36,6 +36,10 @@
 @media (min-width:600px){ :root{ --m:84px; --cue:200px } }
 
 html,body{height:100%}
+/* iPad and iPhone home-screen apps report a page shorter than the screen; --klh is the real height. */
+html.iosgap{height:var(--klh)}
+.iosgap .inkbox.fs, .iosgap .graphbox.fs, .iosgap .sheet-bg{bottom:auto;height:var(--klh)}
+.iosgap #sympanel{bottom:auto;top:var(--klh);transform:translateY(-100%)}
 body{background:var(--paper);color:var(--ink);font-family:var(--text);font-size:16px;line-height:1.6}
 *{box-sizing:border-box}
 button,textarea,input{font:inherit;color:inherit}
@@ -496,6 +500,26 @@ input.redin{color:var(--red)!important;font-family:var(--hand);font-size:18px}
 .verd.ok{color:#1d7a4c} .verd.mid{color:#b06a00} .verd.bad{color:var(--red)} .verd.na{color:var(--soft)}
 .evalbox .kind{margin-top:6px}
 .real .sim{display:none}
+/* Wide, short screens (a tablet on its side): the cover fills the screen, title on the left, doors on the right. */
+@media (min-width:1000px) and (min-aspect-ratio:5/4){
+  .top,.nav{max-width:1352px}
+  .pg{max-width:1320px}
+  .app:has(.cover) .main{padding-bottom:14px}
+  .cover{max-width:1320px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.22fr);grid-template-rows:auto 1fr;column-gap:44px;row-gap:14px;align-items:center;padding-block:22px 24px;padding-inline:66px 52px}
+  .cover .ktop{grid-column:1 / -1}
+  .cover .khead{grid-column:1}
+  .cover > .stack{grid-column:2;min-width:0}
+  .cover .kcurves{transform:translateY(-205px)}
+  .cover .klab{font-size:74px}
+  .cover .ktag{font-size:20px;margin-top:14px;max-width:none}
+  .cover > .stack{gap:22px !important}
+  .cover .lab{padding-bottom:20px}
+  .cover .lab .txt{padding:18px 22px 0;gap:10px;font-size:17.5px}
+  .cover .lab .h{font-size:30px}
+  .cover .lab .go{padding-top:18px;font-size:17px;white-space:nowrap}
+  .cover .lab .arr{width:46px;height:46px}
+  .cover .coverlinks button{padding:9px 20px;font-size:17px}
+}
 .kfirst{position:relative;margin:0;max-width:60ch;color:var(--cover-ink);font-size:16.5px;line-height:1.5}
 .welchead{display:flex;flex-direction:column;gap:12px;margin:8vh 0 6vh;min-width:0}
 .welc{font-family:var(--display);overflow-wrap:anywhere;background:none!important;font-size:clamp(40px,9vw,84px);line-height:1;margin:0;color:var(--foil);letter-spacing:.01em}
@@ -522,10 +546,11 @@ input.redin{color:var(--red)!important;font-family:var(--hand);font-size:18px}
   window.__KL_REAL = true;
   var DB = 'knowledge-lab', STORE = 'kv', db = null;
   function open(){ return new Promise(function(res, rej){ var r = indexedDB.open(DB, 1); r.onupgradeneeded = function(){ r.result.createObjectStore(STORE); }; r.onsuccess = function(){ db = r.result; res(db); }; r.onerror = function(){ rej(r.error); }; }); }
-  function get(k){ return new Promise(function(res, rej){ var t = db.transaction(STORE).objectStore(STORE).get(k); t.onsuccess = function(){ res(t.result); }; t.onerror = function(){ rej(t.error); }; }); }
-  window.__KL_SAVE = function(state){ return new Promise(function(res, rej){ if(!db) return rej(new Error('no database')); var tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).put(state, 'state'); tx.oncomplete = function(){ res(); }; tx.onerror = tx.onabort = function(){ rej(tx.error); }; }); };
-  function start(){ var s = document.createElement('script'); s.src = 'app.js?v=0b6ca797f4'; document.body.appendChild(s); }
-  open().then(function(){ return get('state'); }).then(function(st){ window.__KL_STATE = st || null; }).catch(function(){ window.__KL_STATE = null; }).then(function(){
+  function all(){ return new Promise(function(res, rej){ var out = {}, c = db.transaction(STORE).objectStore(STORE).openCursor(); c.onsuccess = function(){ var cur = c.result; if(cur){ out[cur.key] = cur.value; cur.continue(); } else res(out); }; c.onerror = function(){ rej(c.error); }; }); }
+  // One transaction for a whole save: either every record lands or none does.
+  window.__KL_WRITE = function(puts, dels){ return new Promise(function(res, rej){ if(!db) return rej(new Error('no database')); var tx = db.transaction(STORE, 'readwrite'), st = tx.objectStore(STORE); (puts || []).forEach(function(p){ st.put(p[1], p[0]); }); (dels || []).forEach(function(k){ st.delete(k); }); tx.oncomplete = function(){ res(); }; tx.onerror = tx.onabort = function(){ rej(tx.error); }; }); };
+  function start(){ var s = document.createElement('script'); s.src = 'app.js?v=1ef8d63acb'; document.body.appendChild(s); }
+  open().then(all).then(function(r){ window.__KL_RECS = r || {}; window.__KL_STATE = (r && r.state) || null; }).catch(function(){ window.__KL_RECS = {}; window.__KL_STATE = null; }).then(function(){
     if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function(){});
     start(); });
   if('serviceWorker' in navigator) window.addEventListener('load', function(){ navigator.serviceWorker.register('sw.js').catch(function(){}); });
